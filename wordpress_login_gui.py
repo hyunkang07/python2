@@ -49,6 +49,8 @@ class WordPressLoginApp(QWidget):
         threading.Thread(target=self.login_wordpress, args=(domain, user_id, user_pw), daemon=True).start()
 
     def login_wordpress(self, domain, user_id, user_pw):
+        import os
+        import time
         try:
             chrome_options = Options()
             chrome_options.add_experimental_option('detach', True)
@@ -76,6 +78,50 @@ class WordPressLoginApp(QWidget):
                 add_post_btn.click()
             except Exception as e:
                 print(f"새 글 추가 버튼 클릭 오류: {e}")
+
+            # 워드폴더에서 첫 메모장 파일 읽기
+            word_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'word')
+            txt_files = [f for f in os.listdir(word_dir) if f.endswith('.txt')]
+            if not txt_files:
+                print('word 폴더에 txt 파일이 없습니다.')
+                return
+            first_file = txt_files[0]
+            title = os.path.splitext(first_file)[0]
+            with open(os.path.join(word_dir, first_file), 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # 제목 입력 (class='editor-post-title__input')
+            time.sleep(2)
+            try:
+                title_input = driver.find_element(By.CLASS_NAME, 'editor-post-title__input')
+                title_input.clear()
+                title_input.send_keys(title)
+            except Exception as e:
+                print(f"제목 입력 오류: {e}")
+
+            # 본문 입력 (여러 클래스를 가진 에디터 블록)
+            time.sleep(1)
+            try:
+                from selenium.webdriver.common.action_chains import ActionChains
+                # 먼저 block-editor-default-block-appender__content 클릭
+                try:
+                    appender = driver.find_element(By.CLASS_NAME, 'block-editor-default-block-appender__content')
+                    actions = ActionChains(driver)
+                    actions.move_to_element(appender).click().perform()
+                    time.sleep(0.5)
+                except Exception as e_app:
+                    print(f"블록 어펜더 클릭 오류: {e_app}")
+
+                para = driver.find_element(By.CSS_SELECTOR, '.block-editor-rich-text__editable.wp-block-paragraph.rich-text')
+                actions = ActionChains(driver)
+                actions.move_to_element(para).click().perform()
+                time.sleep(0.5)
+                try:
+                    para.send_keys(content)
+                except Exception as e1:
+                    driver.execute_script("arguments[0].innerText = arguments[1]; arguments[0].dispatchEvent(new Event('input', {bubbles:true}));", para, content)
+            except Exception as e:
+                print(f"본문 입력 오류: {e}")
         except Exception as e:
             QMessageBox.critical(self, '로그인 실패', f'오류 발생: {e}')
 
