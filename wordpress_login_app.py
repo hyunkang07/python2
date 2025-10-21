@@ -8,6 +8,7 @@ from selenium.common.exceptions import NoSuchElementException, TimeoutException
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.support.ui import Select
 import os
 import pandas as pd
 import subprocess
@@ -91,7 +92,7 @@ def start_process():
         options.add_experimental_option('useAutomationExtension', False)
         
         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-        wait = WebDriverWait(driver, 15)
+        wait = WebDriverWait(driver, 30) # 대기 시간을 30초로 늘림
 
         # 1. 로그인
         login_url = f"https://{domain}/wp-admin"
@@ -104,34 +105,42 @@ def start_process():
         
         wait.until(EC.presence_of_element_located((By.ID, "wpadminbar")))
 
-        # 2. 엑셀 파일 반복하며 글 발행
+        # 로그인 성공 여부 재확인
+        if "wp-login.php" in driver.current_url:
+            messagebox.showerror("로그인 실패", "로그인에 실패했습니다. 아이디 또는 비밀번호를 확인해주세요.")
+            driver.quit()
+            return
+
+        # 2. 첫 번째 새 글 작성 페이지로 이동
+        try:
+            driver.get(f"https://{domain}/wp-admin/post-new.php")
+        except Exception as e:
+            messagebox.showerror("페이지 이동 오류", f"'새 글 작성' 페이지로 이동하는 데 실패했습니다.\n\n오류: {e}")
+            driver.quit()
+            return
+        
+        # 3. 엑셀 파일 반복하며 글 발행
         posts_created = 0
         for index, row in df.iterrows():
-            post_title = row.iloc[0]
-            post_content = row.iloc[1]
-
-            if pd.isna(post_title) or str(post_title).strip() == "":
-                break
-
-            # 새 글 작성 페이지로 이동
-            driver.get(f"https://{domain}/wp-admin/post-new.php")
+            # (데이터 추출 및 제목, 본문, 이미지, 날짜 입력 로직은 동일)
+            # 새 글 작성 페이지 로딩 대기
             wait.until(EC.presence_of_element_located((By.ID, "title")))
-
-            # 제목 입력 (클릭이 가로채이는 문제를 해결하기 위해 실제 입력 필드에 직접 입력)
-            title_input = wait.until(EC.presence_of_element_located((By.ID, "title")))
-            title_input.send_keys(str(post_title))
+            
+            # 제목 입력
+            title_input = driver.find_element(By.ID, "title")
+            title_input.clear()
+            title_input.send_keys(str(row.iloc[0]))
             time.sleep(delay_seconds)
             
-            # 본문 입력 (선택한 에디터 모드에 따라 분기)
+            # 본문 입력 (이전 코드 복원)
             editor_mode_selection = editor_mode.get()
-
             if editor_mode_selection == "HTML":
                 try:
                     wait.until(EC.element_to_be_clickable((By.ID, "content-html"))).click()
                     time.sleep(delay_seconds)
                     content_area = driver.find_element(By.CLASS_NAME, "wp-editor-area")
                     content_area.clear()
-                    content_area.send_keys(str(post_content))
+                    content_area.send_keys(str(row.iloc[1]))
                     time.sleep(delay_seconds)
                 except Exception as e:
                     messagebox.showerror("에디터 오류", f"HTML 에디터 모드로 전환하거나 내용을 입력하는 데 실패했습니다.\n{e}")
@@ -143,40 +152,119 @@ def start_process():
                     wait.until(EC.frame_to_be_available_and_switch_to_it((By.ID, "content_ifr")))
                     editor_body = driver.find_element(By.ID, "tinymce")
                     editor_body.clear()
-                    editor_body.send_keys(str(post_content))
+                    editor_body.send_keys(str(row.iloc[1]))
                     time.sleep(delay_seconds)
                     driver.switch_to.default_content()
                 except Exception as e:
                     messagebox.showerror("에디터 오류", f"비주얼 에디터 모드로 전환하거나 내용을 입력하는 데 실패했습니다.\n{e}")
-                    try:
-                        driver.switch_to.default_content()
-                    except:
-                        pass
+                    try: driver.switch_to.default_content()
+                    except: pass
                     break
 
-            # 발행
-            publish_button = driver.find_element(By.ID, "publish")
-            driver.execute_script("arguments[0].click();", publish_button)
-            
-            # 발행 완료 확인
-            wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Post published.') or contains(text(), '게시글이 발행되었습니다.')]")))
-            
-            posts_created += 1
+            # 특성 이미지 URL 입력
+            if str(row.iloc[2]).strip():
+                try:
+                    fifu_input = wait.until(EC.presence_of_element_located((By.ID, "fifu_input_url")))
+                    fifu_input.clear()
+                    fifu_input.send_keys(str(row.iloc[2]))
+                    time.sleep(delay_seconds)
+                except TimeoutException:
+                    messagebox.showwarning("경고", "특성 이미지 URL 입력 필드(ID='fifu_input_url')를 찾지 못했습니다.")
+                    pass
 
-        messagebox.showinfo("성공", f"총 {posts_created}개의 글을 성공적으로 발행했습니다.")
+            # 발행 날짜 설정 (D열) - 안정성 강화 및 디버깅 추가
+            if str(row.iloc[3]):
+                dt_obj = None
+                try:
+                    # 1. 날짜 형식 파싱 시도
+                    dt_obj = pd.to_datetime(str(row.iloc[3]))
+                except Exception:
+                    messagebox.showwarning("날짜 형식 오류", f"엑셀 D열의 날짜 형식을 변환할 수 없습니다: '{str(row.iloc[3])}'\n\n올바른 형식(예: 2025-10-21 14:30)인지 확인해주세요.")
+
+                if dt_obj:
+                    try:
+                        # 2. '편집' 링크 클릭 (JS 클릭으로 안정성 향상)
+                        edit_timestamp_link = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "a.edit-timestamp")))
+                        driver.execute_script("arguments[0].click();", edit_timestamp_link)
+                        
+                        # 3. 날짜 입력 필드가 나타날 때까지 대기
+                        wait.until(EC.visibility_of_element_located((By.ID, "mm")))
+                        
+                        # 4. 날짜/시간 값 입력
+                        Select(driver.find_element(By.ID, 'mm')).select_by_value(dt_obj.strftime('%m'))
+                        jj = driver.find_element(By.ID, 'jj'); jj.clear(); jj.send_keys(dt_obj.strftime('%d'))
+                        aa = driver.find_element(By.ID, 'aa'); aa.clear(); aa.send_keys(str(dt_obj.year))
+                        hh = driver.find_element(By.ID, 'hh'); hh.clear(); hh.send_keys(dt_obj.strftime('%H'))
+                        mn = driver.find_element(By.ID, 'mn'); mn.clear(); mn.send_keys(dt_obj.strftime('%M'))
+                        
+                        # 5. '확인' 버튼 클릭 (JS 클릭으로 안정성 향상)
+                        save_timestamp_button = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "a.save-timestamp")))
+                        driver.execute_script("arguments[0].click();", save_timestamp_button)
+
+                        # 6. 날짜 편집 영역이 다시 사라질 때까지 대기 (성공 확인)
+                        wait.until(EC.invisibility_of_element_located((By.ID, "timestampdiv")))
+                        time.sleep(delay_seconds)
+                    except Exception as e:
+                        messagebox.showwarning("날짜 설정 실패", f"날짜를 설정하는 중 오류가 발생하여 건너뜁니다.\n\n오류: {e}")
+                        # 날짜 설정 실패 시 '취소'를 눌러 열린 창을 닫아줌
+                        try:
+                            cancel_button = driver.find_element(By.CSS_SELECTOR, "a.cancel-timestamp")
+                            driver.execute_script("arguments[0].click();", cancel_button)
+                        except:
+                            pass
+
+            # 임시 저장
+            try:
+                save_button = wait.until(EC.element_to_be_clickable((By.ID, "save-post")))
+                driver.execute_script("arguments[0].click();", save_button)
+                # 저장 완료 확인
+                wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Draft saved.') or contains(text(), '초고가 저장되었습니다.')]")))
+                posts_created += 1
+            except TimeoutException:
+                messagebox.showerror("오류", "'임시 저장' 버튼을 찾거나 저장 완료 메시지를 확인할 수 없습니다.")
+                break
+            
+            # 마지막 행이 아니면 '새로 추가' 버튼 클릭 (뒤로 가기 재시도 기능 추가)
+            if (index + 1) < len(df) and (pd.notna(df.iloc[index + 1].iloc[0])):
+                try:
+                    # 페이지 안정화를 위해 3초 대기
+                    time.sleep(3)
+                    
+                    # 1차 시도
+                    add_new_button = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "page-title-action")))
+                    driver.execute_script("arguments[0].scrollIntoView(true);", add_new_button)
+                    wait.until(EC.element_to_be_clickable((By.CLASS_NAME, "page-title-action")))
+                    driver.execute_script("arguments[0].click();", add_new_button)
+                except TimeoutException:
+                    # 1차 시도 실패 시, 뒤로 갔다가 재시도
+                    try:
+                        driver.back()
+                        time.sleep(3) # 페이지 로드 대기
+                        
+                        # 2차 시도
+                        add_new_button = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "page-title-action")))
+                        driver.execute_script("arguments[0].scrollIntoView(true);", add_new_button)
+                        wait.until(EC.element_to_be_clickable((By.CLASS_NAME, "page-title-action")))
+                        driver.execute_script("arguments[0].click();", add_new_button)
+                    except TimeoutException:
+                        messagebox.showerror("오류", "'새로 추가(page-title-action)' 버튼을 찾지 못하여 작업을 중단합니다.\n\n뒤로 가기 후 재시도했지만 실패했습니다.")
+                        break
+            else:
+                break # 마지막 행이거나 다음 제목이 비어있으면 루프 종료
+
+        messagebox.showinfo("성공", f"총 {posts_created}개의 글을 성공적으로 임시 저장했습니다.")
 
     except (NoSuchElementException, TimeoutException) as e:
-        messagebox.showerror("오류", f"페이지의 요소를 찾지 못했거나 시간 초과되었습니다. (클래식 편집기 모드가 맞는지 확인해주세요)\n{e}")
+        messagebox.showerror("오류", f"페이지의 요소를 찾지 못했거나 시간 초과되었습니다.\n{e}")
     except Exception as e:
         messagebox.showerror("알 수 없는 오류", f"오류가 발생했습니다: {e}")
     finally:
-        # 작업이 끝나면 브라우저를 닫되, 이미 닫혔을 경우 오류를 발생시키지 않음
         if 'driver' in locals():
             try:
-                driver.quit()
+                driver.quit() # 자동 종료 기능 복원
             except Exception:
                 pass
-
+    
 # --- GUI 설정 ---
 root = tk.Tk()
 root.title("워드프레스 자동 글 발행")
